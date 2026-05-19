@@ -4,7 +4,6 @@ import os, csv, math, json
 app = None
 ui  = None
 handlers = []
-_needs_update = False # Global flag to trigger preview only on button click
 
 # --- Persistence Logic ---
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'picket_planter_settings.json')
@@ -15,7 +14,7 @@ def load_settings():
         'leg_elevation': '4.0 in', 'picket_width': '5.5 in', 'picket_thick': '0.625 in',
         'leg_wide': '1.75 in', 'leg_narrow': '1.125 in', 'rim_overhang': '0.25 in',
         'rim_width': '1.75 in', 'cleat_width': '0.5 in', 'cleat_inset': '0.25 in',
-        'stock_length': '96.0 in', 'kerf': '0.125 in', 'cost': 3.50
+        'stock_length': '96.0 in', 'kerf': '0.125 in', 'cost': '3.50'
     }
     if os.path.exists(SETTINGS_FILE):
         try:
@@ -27,24 +26,24 @@ def load_settings():
 
 def save_settings(inputs):
     settings = {}
-    for pid in ['ext_length', 'ext_width', 'target_height', 'leg_elevation', 'picket_width', 'picket_thick', 
-                'leg_wide', 'leg_narrow', 'rim_overhang', 'rim_width', 'cleat_width', 'cleat_inset',
-                'stock_length', 'kerf']:
+    ids = ['ext_length', 'ext_width', 'target_height', 'leg_elevation', 'picket_width', 'picket_thick', 
+           'leg_wide', 'leg_narrow', 'rim_overhang', 'rim_width', 'cleat_width', 'cleat_inset',
+           'stock_length', 'kerf', 'cost']
+    for pid in ids:
         settings[pid] = inputs.itemById(pid).expression
-    settings['cost'] = inputs.itemById('cost').value
     try:
         with open(SETTINGS_FILE, 'w') as f:
             json.dump(settings, f)
     except: pass
 
-# --- Geometry Logic ---
+# --- Geometry Helpers ---
 def draw_rect(sketches, plane, x1, y1, x2, y2):
     sketch = sketches.add(plane)
     lines = sketch.sketchCurves.sketchLines
     lines.addTwoPointRectangle(adsk.core.Point3D.create(x1, y1, 0), adsk.core.Point3D.create(x2, y2, 0))
     return sketch
 
-def draw_polygon(sketches, plane, points):
+def draw_poly(sketches, plane, points):
     sketch = sketches.add(plane)
     lines = sketch.sketchCurves.sketchLines
     for i in range(len(points)):
@@ -52,27 +51,40 @@ def draw_polygon(sketches, plane, points):
         lines.addByTwoPoints(adsk.core.Point3D.create(p1[0], p1[1], 0), adsk.core.Point3D.create(p2[0], p2[1], 0))
     return sketch
 
-def extrude_sketch(comp, sketch, distance_str):
+def extrude_simple(comp, sketch, dist):
     objs = adsk.core.ObjectCollection.create()
     for prof in sketch.profiles: objs.add(prof)
     ext_input = comp.features.extrudeFeatures.createInput(objs, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-    ext_input.setDistanceExtent(False, adsk.core.ValueInput.createByString(distance_str))
+    ext_input.setDistanceExtent(False, adsk.core.ValueInput.createByReal(dist))
     return comp.features.extrudeFeatures.add(ext_input)
 
 def build_model(inputs):
     design = adsk.fusion.Design.cast(app.activeProduct)
     rootComp = design.rootComponent
     
-    L, W, H_t, Elev = [inputs.itemById(n).value for n in ['ext_length', 'ext_width', 'target_height', 'leg_elevation']]
-    PW, PT, LW, LN = [inputs.itemById(n).value for n in ['picket_width', 'picket_thick', 'leg_wide', 'leg_narrow']]
-    O, RW, CW, CI = [inputs.itemById(n).value for n in ['rim_overhang', 'rim_width', 'cleat_width', 'cleat_inset']]
+    # 1. Extraction & Validation
+    try:
+        L = inputs.itemById('ext_length').value
+        W = inputs.itemById('ext_width').value
+        H_t = inputs.itemById('target_height').value
+        Elev = inputs.itemById('leg_elevation').value
+        PW = inputs.itemById('picket_width').value
+        PT = inputs.itemById('picket_thick').value
+        LW = inputs.itemById('leg_wide').value
+        LN = inputs.itemById('leg_narrow').value
+        O = inputs.itemById('rim_overhang').value
+        RW = inputs.itemById('rim_width').value
+        CW = inputs.itemById('cleat_width').value
+        CI = inputs.itemById('cleat_inset').value
+        if PW < 0.1: return None
+    except: return None
 
-    # Snap wall height to strict board multiples
+    # Calculate snapping logic
     count = max(1, round(H_t / PW))
-    actual_wall_h_expr = f"({count} * {inputs.itemById('picket_width').expression})"
-    leg_h_expr = f"{actual_wall_h_expr} + {inputs.itemById('leg_elevation').expression}"
+    wall_h = count * PW
+    leg_h = wall_h + Elev
 
-    # Clear previous preview components
+    # 2. Cleanup & Scaffolding
     existing = rootComp.occurrences.itemByName("Picket Planter")
     if existing: existing.deleteMe()
     
@@ -84,81 +96,88 @@ def build_model(inputs):
         o = pc.occurrences.addNewComponent(adsk.core.Matrix3D.create())
         o.component.name = name; return o.component
 
-    comp_long, comp_short, comp_leg, comp_floor, comp_rim = [sub(n) for n in ["Long Walls", "Short Walls", "Legs", "Floor & Bracing", "Rim Cap"]]
+    comp_long = sub("Long Walls")
+    comp_short = sub("Short Walls")
+    comp_leg = sub("Legs")
+    comp_floor = sub("Floor & Bracing")
+    comp_rim = sub("Rim Cap")
+    
     xy, z_axis = rootComp.xYConstructionPlane, rootComp.zConstructionAxis
 
-    # Legs
-    sk_w1 = draw_rect(comp_leg.sketches, xy, 0, 0, LW, PT); extrude_sketch(comp_leg, sk_w1, leg_h_expr)
-    sk_n1 = draw_rect(comp_leg.sketches, xy, 0, PT, PT, LN); extrude_sketch(comp_leg, sk_n1, leg_h_expr)
-    sk_w2 = draw_rect(comp_leg.sketches, xy, W-LW, 0, W, PT); extrude_sketch(comp_leg, sk_w2, leg_h_expr)
-    sk_n2 = draw_rect(comp_leg.sketches, xy, W-PT, PT, W, LN); extrude_sketch(comp_leg, sk_n2, leg_h_expr)
-    sk_w3 = draw_rect(comp_leg.sketches, xy, 0, L-PT, LW, L); extrude_sketch(comp_leg, sk_w3, leg_h_expr)
-    sk_n3 = draw_rect(comp_leg.sketches, xy, 0, L-LN, PT, L-PT); extrude_sketch(comp_leg, sk_n3, leg_h_expr)
-    sk_w4 = draw_rect(comp_leg.sketches, xy, W-LW, L-PT, W, L); extrude_sketch(comp_leg, sk_w4, leg_h_expr)
-    sk_n4 = draw_rect(comp_leg.sketches, xy, W-PT, L-LN, W, L-PT); extrude_sketch(comp_leg, sk_n4, leg_h_expr)
+    # 3. Legs (Absolute corners)
+    configs = [(0,0,LW,PT,0,PT,PT,LN), (W-LW,0,LW,PT,W-PT,PT,PT,LN), 
+               (0,L-PT,LW,PT,0,L-LN,PT,LN), (W-LW,L-PT,LW,PT,W-PT,L-LN,PT,LN)]
+    for x1,y1,w1,h1,x2,y2,w2,h2 in configs:
+        extrude_simple(comp_leg, draw_rect(comp_leg.sketches, xy, x1, y1, x1+w1, y1+h1), leg_h)
+        extrude_simple(comp_leg, draw_rect(comp_leg.sketches, xy, x2, y2, x2+w2, y2+h2), leg_h)
 
+    # 4. Walls (Recessed between legs)
     wp_in = pc.constructionPlanes.createInput(); wp_in.setByOffset(xy, adsk.core.ValueInput.createByReal(Elev))
     wp = pc.constructionPlanes.add(wp_in)
     
-    # Sides
-    for x_pos in [PT, W-2*PT]:
-        sk = draw_rect(comp_long.sketches, wp, x_pos, PT, x_pos+PT, L-PT)
-        ext = extrude_sketch(comp_long, sk, 'picket_width')
+    # Side Walls
+    for x in [PT, W-2*PT]:
+        sk = draw_rect(comp_long.sketches, wp, x, PT, x+PT, L-PT)
+        ext = extrude_simple(comp_long, sk, PW)
         if count > 1:
             pat_in = comp_long.features.rectangularPatternFeatures.createInput(adsk.core.ObjectCollection.createWithArray(list(ext.bodies)), z_axis, adsk.core.ValueInput.createByReal(count), adsk.core.ValueInput.createByReal(PW), adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
             comp_long.features.rectangularPatternFeatures.add(pat_in)
     
-    # Front/Back
-    for y_pos in [PT, L-2*PT]:
-        sk = draw_rect(comp_short.sketches, wp, 2*PT, y_pos, W-2*PT, y_pos+PT)
-        ext = extrude_sketch(comp_short, sk, 'picket_width')
+    # End Walls
+    for y in [PT, L-2*PT]:
+        sk = draw_rect(comp_short.sketches, wp, 2*PT, y, W-2*PT, y+PT)
+        ext = extrude_simple(comp_short, sk, PW)
         if count > 1:
-            pat_in = comp_short.features.rectangularPatternFeatures.createInput(adsk.core.ObjectCollection.createWithArray(list(ext.bodies)), z_axis, adsk.core.ValueInput.createByReal(count), adsk.core.ValueInput.createByReal(PW), adsk.fusion.PatternDistanceType.SpacingPatternDistanceType)
-            comp_short.features.rectangularPatternFeatures.add(pat_in)
+            pat_in = comp_short.features.rectangularPatternFeatures.add(comp_short.features.rectangularPatternFeatures.createInput(adsk.core.ObjectCollection.createWithArray(list(ext.bodies)), z_axis, adsk.core.ValueInput.createByReal(count), adsk.core.ValueInput.createByReal(PW), adsk.fusion.PatternDistanceType.SpacingPatternDistanceType))
 
-    # Cleats
-    sk_cl = draw_rect(comp_floor.sketches, wp, 2*PT, 2*PT+CI, 2*PT+CW, L-2*PT-CI); extrude_sketch(comp_floor, sk_cl, 'picket_thick')
-    sk_cr = draw_rect(comp_floor.sketches, wp, W-2*PT-CW, 2*PT+CI, W-2*PT, L-2*PT-CI); extrude_sketch(comp_floor, sk_cr, 'picket_thick')
+    # 5. Floor & Cleats
+    # Cleats (Flush to side walls, offset from end walls)
+    extrude_simple(comp_floor, draw_rect(comp_floor.sketches, wp, 2*PT, 2*PT+CI, 2*PT+CW, L-2*PT-CI), PT)
+    extrude_simple(comp_floor, draw_rect(comp_floor.sketches, wp, W-2*PT-CW, 2*PT+CI, W-2*PT, L-2*PT-CI), PT)
     
-    # Floor - Spans from interior of Front wall (2*PT) to interior of Back wall (L-2*PT)
-    fp_in = pc.constructionPlanes.createInput(); fp_in.setByOffset(wp, adsk.core.ValueInput.createByString('picket_thick'))
+    # Solid Floor Slats
+    fp_in = pc.constructionPlanes.createInput(); fp_in.setByOffset(wp, adsk.core.ValueInput.createByReal(PT))
     fp = pc.constructionPlanes.add(fp_in)
-    
-    # Total interior length for slats
     avail_l = L - 4*PT
-    num_full = math.floor(avail_l / PW)
-    remainder = avail_l - (num_full * PW)
-    
-    # Place full width slats butted against each other
-    for j in range(num_full):
-        y_s = 2*PT + j*PW
-        sk = draw_rect(comp_floor.sketches, fp, 2*PT, y_s, W-2*PT, y_s + PW)
-        extrude_sketch(comp_floor, sk, 'picket_thick')
-        
-    # Place rip cut slat to fill the remaining interior gap
-    if remainder > 0.01:
-        y_s = 2*PT + num_full*PW
-        sk = draw_rect(comp_floor.sketches, fp, 2*PT, y_s, W-2*PT, y_s + remainder)
-        objs = adsk.core.ObjectCollection.create()
-        for prof in sk.profiles: objs.add(prof)
-        ext_input = comp_floor.features.extrudeFeatures.createInput(objs, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-        ext_input.setDistanceExtent(False, adsk.core.ValueInput.createByString('picket_thick'))
-        comp_floor.features.extrudeFeatures.add(ext_input)
+    num_f = math.floor(avail_l / PW)
+    for j in range(num_f):
+        sk = draw_rect(comp_floor.sketches, fp, 2*PT, 2*PT+j*PW, W-2*PT, 2*PT+(j+1)*PW)
+        extrude_simple(comp_floor, sk, PT)
+    if avail_l % PW > 0.01:
+        sk = draw_rect(comp_floor.sketches, fp, 2*PT, 2*PT+num_f*PW, W-2*PT, 2*PT+num_f*PW+(avail_l % PW))
+        extrude_simple(comp_floor, sk, PT)
 
-    # Rim
-    rp_in = pc.constructionPlanes.createInput(); rp_in.setByOffset(xy, adsk.core.ValueInput.createByString(leg_h_expr))
+    # 6. Rim Cap
+    rp_in = pc.constructionPlanes.createInput(); rp_in.setByOffset(xy, adsk.core.ValueInput.createByReal(leg_h))
     rp = pc.constructionPlanes.add(rp_in)
-    f_p = [(-O,-O), (W+O,-O), (W+O-RW,-O+RW), (-O+RW,-O+RW)]
-    b_p = [(-O,L+O), (W+O,L+O), (W+O-RW,L+O-RW), (-O+RW,L+O-RW)]
-    l_p = [(-O,-O), (-O+RW,-O+RW), (-O+RW,L+O-RW), (-O,L+O)]
-    r_p = [(W+O,-O), (W+O-RW,-O+RW), (W+O-RW,L+O-RW), (W+O,L+O)]
-    for pts in [f_p, b_p, l_p, r_p]:
-        sk = draw_polygon(comp_rim.sketches, rp, pts); extrude_sketch(comp_rim, sk, 'picket_thick')
+    pts = [[(-O,-O), (W+O,-O), (W+O-RW,-O+RW), (-O+RW,-O+RW)], [(-O,L+O), (W+O,L+O), (W+O-RW,L+O-RW), (-O+RW,L+O-RW)],
+           [(-O,-O), (-O+RW,-O+RW), (-O+RW,L+O-RW), (-O,L+O)], [(W+O,-O), (W+O-RW,-O+RW), (W+O-RW,L+O-RW), (W+O,L+O)]]
+    for p in pts: extrude_simple(comp_rim, draw_poly(comp_rim.sketches, rp, p), PT)
     return pc
 
-def export_bom(pc, inputs):
-    folder_dialog = ui.createFolderDialog()
-    folder_dialog.title = "Select Folder for BOM"
+def optimize_ffd(bodies, stock_l, kerf):
+    groups = {}
+    for b in bodies:
+        t, w = round(b['thick'], 3), round(b['width'], 3)
+        if t > w: t, w = w, t
+        key = (t, w)
+        if key not in groups: groups[key] = []
+        groups[key].append(b)
+    layout = {}; total_b = 0
+    for key, parts in groups.items():
+        parts = sorted(parts, key=lambda x: x['length'], reverse=True)
+        bins = []
+        for p in parts:
+            placed = False
+            for i in range(len(bins)):
+                if sum(x['length'] for x in bins[i]) + len(bins[i])*kerf + p['length'] <= stock_l:
+                    bins[i].append(p); placed = True; break
+            if not placed: bins.append([p])
+        layout[key] = bins; total_b += len(bins)
+    return layout, total_b
+
+def export_csv(pc, inputs):
+    folder_dialog = ui.createFolderDialog(); folder_dialog.title = "Select Folder for BOM"
     if folder_dialog.showDialog() == adsk.core.DialogResults.DialogOK:
         bodies = []
         for occ in pc.allOccurrences:
@@ -170,121 +189,79 @@ def export_bom(pc, inputs):
         
         stock_l = inputs.itemById('stock_length').value / 2.54
         kerf = inputs.itemById('kerf').value / 2.54
-        cost = inputs.itemById('cost').value
-        # Reusing the First-Fit Decreasing optimization logic
-        groups = {}
-        for b in bodies:
-            t, w = round(b['thick'], 3), round(b['width'], 3)
-            if t > w: t, w = w, t
-            key = (t, w)
-            if key not in groups: groups[key] = []
-            groups[key].append(b)
-        layout = {}; total_boards = 0
-        for key, parts in groups.items():
-            parts = sorted(parts, key=lambda x: x['length'], reverse=True)
-            bins = []
-            for part in parts:
-                placed = False
-                for i in range(len(bins)):
-                    used = sum(p['length'] for p in bins[i]) + len(bins[i]) * kerf
-                    if used + part['length'] <= stock_l:
-                        bins[i].append(part); placed = True; break
-                if not placed: bins.append([part])
-            layout[key] = bins; total_boards += len(bins)
+        cost = float(inputs.itemById('cost').expression)
+        layout, boards = optimize_ffd(bodies, stock_l, kerf)
         
         path = os.path.join(folder_dialog.folder, 'planter_bom_and_cutlist.csv')
         with open(path, 'w', newline='') as f:
             w = csv.writer(f)
-            w.writerow(['--- PROJECT SUMMARY ---'])
-            w.writerow(['Total Boards:', total_boards, 'Cost:', f'${total_boards*cost:.2f}'])
-            w.writerow([]); w.writerow(['--- BOM ---'])
-            w.writerow(['Part', 'Qty', 'T', 'W', 'L'])
+            w.writerow(['--- SUMMARY ---']); w.writerow(['Boards:', boards, 'Cost:', f'${boards*cost:.2f}'])
+            w.writerow([]); w.writerow(['--- BOM ---']); w.writerow(['Part', 'Qty', 'T', 'W', 'L'])
             counts = {}
             for b in bodies:
                 k = (b['name'], round(b['thick'],3), round(b['width'],3), round(b['length'],3))
                 counts[k] = counts.get(k, 0) + 1
-            for k, q in counts.items(): w.writerow([k[0], q, k[1], k[2], f'{k[3]:.2f}'])
+            for k, q in sorted(counts.items()): w.writerow([k[0], q, k[1], k[2], f'{k[3]:.2f}'])
             w.writerow([]); w.writerow(['--- CUT LIST ---'])
             for key, bins in layout.items():
-                w.writerow([f'Stock: {key[0]}" x {key[1]}"'])
+                w.writerow([f'Stock: {key[0]}x{key[1]}'])
                 for i, bl in enumerate(bins): w.writerow([f' Board #{i+1}', ", ".join([f"{p['name']} ({p['length']:.2f}\")" for p in bl])])
-        ui.messageBox(f"BOM exported to:\n{path}")
+        ui.messageBox(f"Exported: {path}")
 
-# --- UI Handlers ---
-class PlanterCommandExecuteHandler(adsk.core.CommandEventHandler):
+# --- Handlers ---
+class PlanterExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try:
             inputs = args.firingEvent.sender.commandInputs
-            build_model(inputs) # Final build
-            save_settings(inputs)
+            build_model(inputs); save_settings(inputs)
         except: ui.messageBox(traceback.format_exc())
 
-class PlanterCommandExecutePreviewHandler(adsk.core.CommandEventHandler):
+class PlanterPreviewHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
-        global _needs_update
-        if _needs_update:
-            try:
-                build_model(args.firingEvent.sender.commandInputs)
-                args.isValidResult = True
-                _needs_update = False
-            except: pass
-
-class PlanterCommandInputChangedHandler(adsk.core.InputChangedEventHandler):
-    def notify(self, args):
-        global _needs_update
         try:
-            cmd_input = args.input
-            if cmd_input.id == 'btn_update':
-                _needs_update = True
-            elif cmd_input.id == 'btn_bom':
-                inputs = args.firingEvent.sender.commandInputs
-                pc = build_model(inputs)
-                export_bom(pc, inputs)
+            build_model(args.firingEvent.sender.commandInputs)
+            args.isValidResult = True
         except: pass
 
-class PlanterCommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
+class PlanterInputHandler(adsk.core.InputChangedEventHandler):
+    def notify(self, args):
+        try:
+            if args.input.id == 'btn_update':
+                args.firingEvent.sender.doExecutePreview()
+            elif args.input.id == 'btn_bom':
+                pc = build_model(args.firingEvent.sender.commandInputs)
+                if pc: export_csv(pc, args.firingEvent.sender.commandInputs)
+        except: pass
+
+class PlanterCreatedHandler(adsk.core.CommandCreatedEventHandler):
     def notify(self, args):
         cmd = args.command
-        cmd.isExecutedWhenOk = True # OK finishes the model
-        
-        onEx = PlanterCommandExecuteHandler(); cmd.execute.add(onEx); handlers.append(onEx)
-        onPr = PlanterCommandExecutePreviewHandler(); cmd.executePreview.add(onPr); handlers.append(onPr)
-        onCh = PlanterCommandInputChangedHandler(); cmd.inputChanged.add(onCh); handlers.append(onCh)
-        
+        onEx = PlanterExecuteHandler(); cmd.execute.add(onEx); handlers.append(onEx)
+        onPr = PlanterPreviewHandler(); cmd.executePreview.add(onPr); handlers.append(onPr)
+        onCh = PlanterInputHandler(); cmd.inputChanged.add(onCh); handlers.append(onCh)
         inputs = cmd.commandInputs
         s = load_settings()
-        
-        inputs.addValueInput('ext_length', 'Ext Length', 'in', adsk.core.ValueInput.createByString(s['ext_length']))
-        inputs.addValueInput('ext_width', 'Ext Width', 'in', adsk.core.ValueInput.createByString(s['ext_width']))
-        inputs.addValueInput('target_height', 'Target Height', 'in', adsk.core.ValueInput.createByString(s['target_height']))
-        inputs.addValueInput('leg_elevation', 'Leg Elevation', 'in', adsk.core.ValueInput.createByString(s['leg_elevation']))
-        inputs.addValueInput('picket_width', 'Picket Width', 'in', adsk.core.ValueInput.createByString(s['picket_width']))
-        inputs.addValueInput('picket_thick', 'Picket Thick', 'in', adsk.core.ValueInput.createByString(s['picket_thick']))
-        inputs.addValueInput('leg_wide', 'Leg Wide', 'in', adsk.core.ValueInput.createByString(s['leg_wide']))
-        inputs.addValueInput('leg_narrow', 'Leg Narrow', 'in', adsk.core.ValueInput.createByString(s['leg_narrow']))
-        inputs.addValueInput('rim_overhang', 'Rim Overhang', 'in', adsk.core.ValueInput.createByString(s['rim_overhang']))
-        inputs.addValueInput('rim_width', 'Rim Width', 'in', adsk.core.ValueInput.createByString(s['rim_width']))
-        inputs.addValueInput('cleat_width', 'Cleat Width', 'in', adsk.core.ValueInput.createByString(s['cleat_width']))
-        inputs.addValueInput('cleat_inset', 'Cleat Offset', 'in', adsk.core.ValueInput.createByString(s['cleat_inset']))
-        inputs.addValueInput('stock_length', 'Stock Length', 'in', adsk.core.ValueInput.createByString(s['stock_length']))
-        inputs.addValueInput('kerf', 'Saw Kerf', 'in', adsk.core.ValueInput.createByString(s['kerf']))
-        inputs.addValueInput('cost', 'Cost/Board', '', adsk.core.ValueInput.createByReal(float(s['cost'])))
-        
+        for p, l in [('ext_length','Length'),('ext_width','Width'),('target_height','Tgt H'),('leg_elevation','Elev'),
+                     ('picket_width','Picket W'),('picket_thick','Picket T'),('leg_wide','Leg W'),('leg_narrow','Leg N'),
+                     ('rim_overhang','Rim Oh'),('rim_width','Rim W'),('cleat_width','Cleat W'),('cleat_inset','Cleat Off'),
+                     ('stock_length','Stock L'),('kerf','Saw K')]:
+            inputs.addValueInput(p, l, 'in', adsk.core.ValueInput.createByString(s[p]))
+        inputs.addValueInput('cost', 'Cost/Bd', '', adsk.core.ValueInput.createByString(s['cost']))
         inputs.addBoolValueInput('btn_update', 'Update Drawing', False, '', True)
         inputs.addBoolValueInput('btn_bom', 'Build BOM & Cut List', False, '', True)
 
 def run(context):
     try:
         global app, ui; app = adsk.core.Application.get(); ui = app.userInterface
-        cmdDef = ui.commandDefinitions.itemById('PicketPlanterFinalV2')
-        if not cmdDef: cmdDef = ui.commandDefinitions.addButtonDefinition('PicketPlanterFinalV2', 'Picket Planter (Fixed Update)', '')
-        onCr = PlanterCommandCreatedHandler(); cmdDef.commandCreated.add(onCr); handlers.append(onCr)
+        cmdDef = ui.commandDefinitions.itemById('PicketPlanterV6')
+        if not cmdDef: cmdDef = ui.commandDefinitions.addButtonDefinition('PicketPlanterV6', 'Picket Planter (Stable)', '')
+        onCr = PlanterCreatedHandler(); cmdDef.commandCreated.add(onCr); handlers.append(onCr)
         cmdDef.execute()
         adsk.autoTerminate(False)
     except: ui.messageBox(traceback.format_exc())
 
 def stop(context):
     try:
-        cmdDef = ui.commandDefinitions.itemById('PicketPlanterFinalV2')
+        cmdDef = ui.commandDefinitions.itemById('PicketPlanterV6')
         if cmdDef: cmdDef.deleteMe()
     except: pass

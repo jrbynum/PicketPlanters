@@ -67,8 +67,10 @@ def build_model(inputs):
     PW, PT, LW, LN = [inputs.itemById(n).value for n in ['picket_width', 'picket_thick', 'leg_wide', 'leg_narrow']]
     O, RW, CW, CI = [inputs.itemById(n).value for n in ['rim_overhang', 'rim_width', 'cleat_width', 'cleat_inset']]
 
-    count = max(1, math.floor(H_t / PW))
-    leg_h_expr = f"({count} * {inputs.itemById('picket_width').expression}) + {inputs.itemById('leg_elevation').expression}"
+    # Snap wall height to strict board multiples
+    count = max(1, round(H_t / PW))
+    actual_wall_h_expr = f"({count} * {inputs.itemById('picket_width').expression})"
+    leg_h_expr = f"{actual_wall_h_expr} + {inputs.itemById('leg_elevation').expression}"
 
     # Clear previous preview components
     existing = rootComp.occurrences.itemByName("Picket Planter")

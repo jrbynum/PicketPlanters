@@ -1,0 +1,18 @@
+# Fusion 360 User Data
+.picket_planter_settings.json
+picket_planter_settings.json
+
+# System Files
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -4,7 +4,7 @@ import os, csv, math, json
 app = None
 ui  = None
 handlers = []
-_should_rebuild = False # Manual flag to control model generation
+_should_rebuild = False 
 
 # --- Persistence Logic ---
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'picket_planter_settings.json')
@@ -35,7 +35,7 @@ def save_settings(inputs):
         with open(SETTINGS_FILE, 'w') as f: json.dump(settings, f)
     except: pass
 
-# --- Geometry Helpers ---
+# --- Geometry Logic ---
 def draw_rect(sketches, plane, x1, y1, x2, y2):
     sketch = sketches.add(plane)
     lines = sketch.sketchCurves.sketchLines
@@ -60,7 +60,6 @@ def extrude_simple(comp, sketch, dist):
 def build_model(inputs):
     design = adsk.fusion.Design.cast(app.activeProduct)
     rootComp = design.rootComponent
-    
     try:
         L, W = inputs.itemById('ext_length').value, inputs.itemById('ext_width').value
         H_t, Elev = inputs.itemById('target_height').value, inputs.itemById('leg_elevation').value
@@ -71,20 +70,14 @@ def build_model(inputs):
         if PW < 0.1: return None
     except: return None
 
-    count = max(1, round(H_t / PW))
-    wall_h = count * PW; leg_h = wall_h + Elev
-
-    # Cleanup previous preview
+    count = max(1, round(H_t / PW)); wall_h = count * PW; leg_h = wall_h + Elev
     existing = rootComp.occurrences.itemByName("Picket Planter")
     if existing: existing.deleteMe()
     
     mainOcc = rootComp.occurrences.addNewComponent(adsk.core.Matrix3D.create())
     mainOcc.component.name = "Picket Planter"; pc = mainOcc.component
-    
     def sub(name):
-        o = pc.occurrences.addNewComponent(adsk.core.Matrix3D.create())
-        o.component.name = name; return o.component
-
+        o = pc.occurrences.addNewComponent(adsk.core.Matrix3D.create()); o.component.name = name; return o.component
     c_long, c_short, c_leg, c_floor, c_rim = [sub(n) for n in ["Long Walls", "Short Walls", "Legs", "Floor & Bracing", "Rim Cap"]]
     xy, z_axis = rootComp.xYConstructionPlane, rootComp.zConstructionAxis
 
@@ -96,8 +89,6 @@ def build_model(inputs):
 
     wp_in = pc.constructionPlanes.createInput(); wp_in.setByOffset(xy, adsk.core.ValueInput.createByReal(Elev))
     wp = pc.constructionPlanes.add(wp_in)
-    
-    # Walls
     for x in [PT, W-2*PT]:
         sk = draw_rect(c_long.sketches, wp, x, PT, x+PT, L-PT); ex = extrude_simple(c_long, sk, PW)
         if count > 1: c_long.features.rectangularPatternFeatures.add(c_long.features.rectangularPatternFeatures.createInput(adsk.core.ObjectCollection.createWithArray(list(ex.bodies)), z_axis, adsk.core.ValueInput.createByReal(count), adsk.core.ValueInput.createByReal(PW), adsk.fusion.PatternDistanceType.SpacingPatternDistanceType))
@@ -105,10 +96,8 @@ def build_model(inputs):
         sk = draw_rect(c_short.sketches, wp, 2*PT, y, W-2*PT, y+PT); ex = extrude_simple(c_short, sk, PW)
         if count > 1: c_short.features.rectangularPatternFeatures.add(c_short.features.rectangularPatternFeatures.createInput(adsk.core.ObjectCollection.createWithArray(list(ex.bodies)), z_axis, adsk.core.ValueInput.createByReal(count), adsk.core.ValueInput.createByReal(PW), adsk.fusion.PatternDistanceType.SpacingPatternDistanceType))
 
-    # Floor/Cleats
     extrude_simple(c_floor, draw_rect(c_floor.sketches, wp, 2*PT, 2*PT+CI, 2*PT+CW, L-2*PT-CI), PT)
     extrude_simple(c_floor, draw_rect(c_floor.sketches, wp, W-2*PT-CW, 2*PT+CI, W-2*PT, L-2*PT-CI), PT)
-    
     fp_in = pc.constructionPlanes.createInput(); fp_in.setByOffset(wp, adsk.core.ValueInput.createByReal(PT))
     fp = pc.constructionPlanes.add(fp_in); avail_l = L - 4*PT; num_f = math.floor(avail_l / PW)
     for j in range(num_f):
@@ -116,7 +105,6 @@ def build_model(inputs):
     if avail_l % PW > 0.01:
         extrude_simple(c_floor, draw_rect(c_floor.sketches, fp, 2*PT, 2*PT+num_f*PW, W-2*PT, 2*PT+num_f*PW+(avail_l % PW)), PT)
 
-    # Rim
     rp_in = pc.constructionPlanes.createInput(); rp_in.setByOffset(xy, adsk.core.ValueInput.createByReal(leg_h))
     rp = pc.constructionPlanes.add(rp_in)
     pts = [[(-O,-O), (W+O,-O), (W+O-RW,-O+RW), (-O+RW,-O+RW)], [(-O,L+O), (W+O,L+O), (W+O-RW,L+O-RW), (-O+RW,L+O-RW)],
@@ -168,7 +156,6 @@ def export_csv(pc, inputs):
                 for i, bl in enumerate(bins): w.writerow([f' Board #{i+1}', ", ".join([f"{p['name']} ({p['length']:.2f}\")" for p in bl])])
         ui.messageBox(f"Exported: {path}")
 
-# --- Handlers ---
 class PlanterExecuteHandler(adsk.core.CommandEventHandler):
     def notify(self, args):
         try: build_model(args.firingEvent.sender.commandInputs); save_settings(args.firingEvent.sender.commandInputs)
@@ -205,14 +192,18 @@ class PlanterCreatedHandler(adsk.core.CommandCreatedEventHandler):
                      ('stock_length','Stock L'),('kerf','Saw K')]:
             inputs.addValueInput(p, l, 'in', adsk.core.ValueInput.createByString(s[p]))
         inputs.addValueInput('cost', 'Cost/Bd', '', adsk.core.ValueInput.createByString(s['cost']))
-        inputs.addBoolValueInput('btn_update', 'Update Drawing', False, '', True)
-        inputs.addBoolValueInput('btn_bom', 'Build BOM & Cut List', False, '', True)
+        
+        # Using BoolValueInputs as functional buttons
+        btn_update = inputs.addBoolValueInput('btn_update', 'Update Drawing', False, '', True)
+        btn_update.isFullWidth = True
+        btn_bom = inputs.addBoolValueInput('btn_bom', 'Build BOM & Cut List', False, '', True)
+        btn_bom.isFullWidth = True
 
 def run(context):
     try:
         global app, ui; app = adsk.core.Application.get(); ui = app.userInterface
-        cmdDef = ui.commandDefinitions.itemById('PicketPlanterV7')
-        if not cmdDef: cmdDef = ui.commandDefinitions.addButtonDefinition('PicketPlanterV7', 'Picket Planter (Manual Update)', '')
+        cmdDef = ui.commandDefinitions.itemById('PicketPlanterFinalV3')
+        if not cmdDef: cmdDef = ui.commandDefinitions.addButtonDefinition('PicketPlanterFinalV3', 'Picket Planter (Stable v2)', '')
         onCr = PlanterCreatedHandler(); cmdDef.commandCreated.add(onCr); handlers.append(onCr)
         cmdDef.execute()
         adsk.autoTerminate(False)
@@ -220,6 +211,6 @@ def run(context):
 
 def stop(context):
     try:
-        cmdDef = ui.commandDefinitions.itemById('PicketPlanterV7')
+        cmdDef = ui.commandDefinitions.itemById('PicketPlanterFinalV3')
         if cmdDef: cmdDef.deleteMe()
     except: pass
